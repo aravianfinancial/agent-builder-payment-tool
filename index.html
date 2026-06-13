@@ -435,7 +435,7 @@
         <!-- Property taxes -->
         <div class="card">
           <div class="card-head"><span class="card-num">3</span><h2>Estimated Property Taxes</h2></div>
-          <div class="sub">New construction — taxes are estimated by adding each taxing authority. For each one, the exemption is subtracted from the purchase price, then the rate is applied. Add up to 10.</div>
+          <div class="sub">New construction — taxes are estimated by adding each taxing authority. For each one, the exemption (a dollar amount or a % of the price) is subtracted from the purchase price, then the rate is applied. Add up to 10.</div>
 
           <div id="entityList"></div>
 
@@ -539,10 +539,18 @@ function amortize(principal, annualRate, months){
 
 /* ---------- VA funding fee ---------- */
 function vaFee(downPct, useType){
+  // VA-backed purchase & construction loans — effective April 7, 2023
+  // Fee is a % of the loan amount (base loan).
   if(useType==='exempt') return 0;
-  if(downPct >= 10) return 1.25;
-  if(downPct >= 5)  return 1.50;
-  return useType==='subsequent' ? 3.30 : 2.15;
+  if(useType==='subsequent'){          // "After first use"
+    if(downPct < 5)  return 3.30;      // less than 5% down
+    if(downPct < 10) return 1.50;      // 5% or more
+    return 1.25;                       // 10% or more
+  } else {                             // "First use"
+    if(downPct < 5)  return 2.15;      // less than 5% down
+    if(downPct < 10) return 1.50;      // 5% or more
+    return 1.25;                       // 10% or more
+  }
 }
 
 /* ---------- program detail panel ---------- */
@@ -584,7 +592,7 @@ function renderProgPanel(){
         <label for="vaUse">Entitlement use</label>
         <select id="vaUse">
           <option value="first" selected>First use</option>
-          <option value="subsequent">Subsequent use</option>
+          <option value="subsequent">After first use</option>
           <option value="exempt">Exempt (disability / DIC) — 0%</option>
         </select>
         <div class="hint" style="margin-top:6px" id="vaFeeHint"></div>
@@ -610,10 +618,10 @@ function renderProgPanel(){
 }
 
 /* ---------- tax entities ---------- */
-function addEntity(name='', exemption='', rate=''){
+function addEntity(name='', exemption='', rate='', exemptionType='$'){
   if(entities.length >= MAX_ENTITIES) return;
   const id = ++entitySeq;
-  entities.push({id,name,exemption,rate});
+  entities.push({id,name,exemption,rate,exemptionType});
   renderEntities();
   recalc();
 }
@@ -642,9 +650,17 @@ function renderEntities(){
           <input type="text" data-f="name" data-id="${e.id}" placeholder="e.g. Harris County, HISD, MUD 211" value="${e.name.replace(/"/g,'&quot;')}">
         </div>
         <div class="field" style="margin:0">
-          <label>Exemption amount</label>
-          <div class="input-prefix"><span>$</span>
-            <input type="number" data-f="exemption" data-id="${e.id}" inputmode="decimal" placeholder="0" value="${e.exemption}"></div>
+          <label>Exemption <span class="hint">$ or % of price</span></label>
+          <div style="display:flex;gap:8px">
+            ${ e.exemptionType==='%'
+              ? `<div class="input-suffix input-prefix" style="flex:1"><span style="left:auto;right:13px">%</span><input type="number" data-f="exemption" data-id="${e.id}" inputmode="decimal" step="0.1" placeholder="0" value="${e.exemption}"></div>`
+              : `<div class="input-prefix" style="flex:1"><span>$</span><input type="number" data-f="exemption" data-id="${e.id}" inputmode="decimal" placeholder="0" value="${e.exemption}"></div>`
+            }
+            <select data-f="exemptionType" data-id="${e.id}" style="width:auto;min-width:74px;flex:none">
+              <option value="$" ${e.exemptionType==='$'?'selected':''}>$</option>
+              <option value="%" ${e.exemptionType==='%'?'selected':''}>%</option>
+            </select>
+          </div>
         </div>
         <div class="field" style="margin:0">
           <label>Tax rate <span class="hint">% of taxable value</span></label>
@@ -658,11 +674,15 @@ function renderEntities(){
       </div>`;
     list.appendChild(div);
   });
-  list.querySelectorAll('input').forEach(inp=>{
-    inp.addEventListener('input', ev=>{
+  list.querySelectorAll('input,select').forEach(el=>{
+    const evt = el.tagName==='SELECT' ? 'change' : 'input';
+    el.addEventListener(evt, ev=>{
       const id = +ev.target.dataset.id, f = ev.target.dataset.f;
       const ent = entities.find(x=>x.id===id);
-      if(ent){ ent[f] = ev.target.value; recalc(); }
+      if(!ent) return;
+      ent[f] = ev.target.value;
+      if(f==='exemptionType') renderEntities();  // swap $/% symbol
+      recalc();
     });
   });
   list.querySelectorAll('[data-rm]').forEach(b=>{
@@ -716,9 +736,11 @@ function recalc(){
   // taxes
   let annualTax = 0;
   entities.forEach(e=>{
-    const ex = parseFloat((e.exemption||'').toString().replace(/,/g,''))||0;
+    const exType = e.exemptionType || '$';
+    const exRaw = parseFloat((e.exemption||'').toString().replace(/,/g,''))||0;
+    const exDollars = exType==='%' ? price*exRaw/100 : exRaw;
     const r  = parseFloat((e.rate||'').toString().replace(/,/g,''))||0;
-    const tv = Math.max(price - ex, 0);
+    const tv = Math.max(price - exDollars, 0);
     const et = tv * r/100;
     annualTax += et;
     const tvEl = document.querySelector(`[data-tv="${e.id}"]`);
@@ -836,9 +858,11 @@ function buildPrintSheet(d){
   const date = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
 
   const taxRows = entities.map((e,i)=>{
-    const ex = parseFloat((e.exemption||'').toString().replace(/,/g,''))||0;
+    const exType = e.exemptionType || '$';
+    const exRaw = parseFloat((e.exemption||'').toString().replace(/,/g,''))||0;
+    const exDollars = exType==='%' ? d.price*exRaw/100 : exRaw;
     const r  = parseFloat((e.rate||'').toString().replace(/,/g,''))||0;
-    const tv = Math.max(d.price-ex,0);
+    const tv = Math.max(d.price-exDollars,0);
     const et = tv*r/100;
     return `<tr><td>${e.name||('Authority '+(i+1))}</td><td>${usd(tv)}</td><td>${pct(r)}</td><td class="pay">${usd(et)}</td></tr>`;
   }).join('');
@@ -904,7 +928,7 @@ function buildPrintSheet(d){
     </div>
 
     <div class="p-foot">
-      <img src="https://244206387.fs1.hubspotusercontent-na2.net/hubfs/244206387/EHO%20-%20White%20-%20Transparent.png" alt="Equal Housing Opportunity">
+      <img src="https://244206387.fs1.hubspotusercontent-na2.net/hubfs/244206387/EHO%20White%20PNG.png" alt="Equal Housing Opportunity">
       <div class="nm">
         <strong>Aravian Financial</strong> — Licensed Mortgage Broker, State of Texas · Equal Housing Opportunity<br>
         Kris Syevens NMLS #566937 · Aravian Financial NMLS #2691016<br>
